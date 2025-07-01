@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Lemon Slice Real-Time API Demo</title>
+  <script src="https://unpkg.com/@daily-co/daily-js"></script>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 640px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+
+    .container {
+      text-align: center;
+    }
+
+    #daily-iframe {
+      border: 2px solid #333;
+      border-radius: 8px;
+      margin: 20px 0;
+      width: 640px;
+      height: 480px;
+    }
+
+    .controls {
+      margin: 20px 0;
+    }
+
+    button {
+      background: #007bff;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 5px;
+      cursor: pointer;
+      margin: 0 10px;
+      font-size: 16px;
+    }
+
+    button:hover {
+      background: #0056b3;
+    }
+
+    button:disabled {
+      background: #6c757d;
+      cursor: not-allowed;
+    }
+
+    .status {
+      margin: 10px 0;
+      padding: 10px;
+      border-radius: 5px;
+      font-weight: bold;
+    }
+
+    .status.connecting {
+      background: #fff3cd;
+      color: #856404;
+    }
+
+    .status.connected {
+      background: #d4edda;
+      color: #155724;
+    }
+
+    .status.error {
+      background: #f8d7da;
+      color: #721c24;
+    }
+
+    .config {
+      background: #f8f9fa;
+      padding: 15px;
+      border-radius: 5px;
+      margin: 20px 0;
+      text-align: left;
+    }
+
+    .config input, .config textarea, .config select {
+      width: 100%;
+      padding: 8px;
+      margin: 5px 0;
+      border: 1px solid #ddd;
+      border-radius: 3px;
+    }
+
+    .config label {
+      display: block;
+      margin-top: 10px;
+      font-weight: bold;
+    }
+
+    #audioFile {
+      margin: 10px 0;
+    }
+
+    .audio-config > div {
+      flex: 1;
+    }
+
+    .audio-config select {
+      width: auto;
+      min-width: 100px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Lemon Slice Real-Time API Demo</h1>
+
+    <div class="config">
+      <h3>Configuration</h3>
+      <div class="auth-section">
+        <label for="apiTokenInput">API Token:</label>
+        <input id="apiTokenInput" placeholder="Please enter your Lemon Slice API token">
+      </div>
+
+      <label for="imageUrlInput">Image URL:</label>
+      <input type="url" id="imageUrlInput">
+      <small style="display: block; color: #666; margin-top: 5px;">
+        💡 Characters are cached per image URL. Change the URL to create a new character.
+      </small>
+
+      <label for="audioFile">Audio File (Raw 16kHz):</label>
+      <input type="file" id="audioFile" accept=".raw,.pcm">
+
+      <label for="playCount">Play Count (to test long responses):</label>
+      <select id="playCount">
+        <option value="1">1x</option>
+        <option value="2" selected>2x</option>
+        <option value="5">5x</option>
+        <option value="10">10x</option>
+      </select>
+    </div>
+
+    <div class="controls">
+      <button id="connectBtn" onclick="initializeConnection()">Connect to Stream</button>
+      <button id="sendAudioBtn" onclick="sendAudio()" disabled>Send Audio</button>
+      <button id="stopBtn" onclick="stopStream()" disabled>Stop Stream</button>
+    </div>
+
+    <div id="status" class="status">Ready to connect</div>
+
+    <div id="daily-iframe"></div>
+  </div>
+
+  <script>
+    const API_BASE_URL = "https://www.lemonslice.com/api/stream";
+    const FRAME_RATE = 25;
+    const DEFAULT_IMAGE_URL = "https://6ammc3n5zzf5ljnz.public.blob.vercel-storage.com/inf2-image-uploads/image_63e52-eRRSrv7K7CQ4Bgp8ojTbpiR6ZBoqfT.jpg"
+
+    let websocket = null;
+    let responseId = null;
+    let dailyCall = null;
+    let characterCache = {
+      [DEFAULT_IMAGE_URL]: {
+        "square_base_img_url": "https://6ammc3n5zzf5ljnz.public.blob.vercel-storage.com/chat-cache/cropped-images/image-Z9bwrml0s5RoCw8rSAu9vLwvaMMIUp.png",
+        "cropped_image_url": "https://6ammc3n5zzf5ljnz.public.blob.vercel-storage.com/chat-cache/cropped-images/image-3k30C12tX3lA6JJ2QVpd5MfD9Zpj83.png",
+        "face_crop_params": [
+          0,
+          0,
+          1202,
+          1202
+        ],
+        "ref_latents_url": "https://6ammc3n5zzf5ljnz.public.blob.vercel-storage.com/chat-cache/ref-latents/data-MM5tM6aHrIeri6Qsi7LxpBKxFp5lq9.json",
+        "idle_frames_url": "https://6ammc3n5zzf5ljnz.public.blob.vercel-storage.com/chat-cache/idle-frames/data-lcdPv1UQtFfYn50yXsiB7np7Fqkzs0.json"
+      }
+    };
+    let audioData = null;
+    let isStreaming = false;
+
+    function updateStatus(message, type = '') {
+      const statusEl = document.getElementById('status');
+      statusEl.textContent = message;
+      statusEl.className = `status ${type}`;
+    }
+
+    function generateUUID() {
+      return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+        var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+      });
+    }
+
+    function getAuthHeaders() {
+      const token = document.getElementById('apiTokenInput').value.trim();
+      if (!token) {
+        throw new Error('API token is required');
+      }
+      return {
+        'Authorization': `Bearer ${token}`
+      };
+    }
+
+    async function makeRequest(url, options = {}) {
+      const authHeaders = getAuthHeaders();
+      
+      const response = await fetch(url, {
+        ...options,
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders,
+          ...options.headers
+        }
+      });
+
+      if (!response.ok) {
+        if (response.status === 401) {
+          throw new Error('Authentication failed - check your API token');
+        }
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      return response.json();
+    }
+
+    async function createCharacter() {
+      const imageUrl = document.getElementById('imageUrlInput').value;
+      return await makeRequest(`${API_BASE_URL}/create-character`, {
+        method: 'POST',
+        body: JSON.stringify({ image_url: imageUrl })
+      });
+    }
+
+    async function createSession(character) {
+      const imageUrl = document.getElementById('imageUrlInput').value;
+      return await makeRequest(`${API_BASE_URL}/new-session`, {
+        method: 'POST',
+        body: JSON.stringify({
+          image_url: imageUrl,
+          ...character
+        })
+      });
+    }
+
+    async function setupSession() {
+      const imageUrl = document.getElementById('imageUrlInput').value;
+
+      updateStatus('Creating or loading character...', 'connecting');
+
+      // check cache first
+      if (!characterCache[imageUrl]) {
+        console.log('Creating new character for image:', imageUrl);
+        characterCache[imageUrl] = await createCharacter();
+      } else {
+        console.log('Using cached character for image:', imageUrl);
+      }
+
+      updateStatus('Creating session...', 'connecting');
+      const sessionInfo = await createSession(characterCache[imageUrl]);
+
+      return sessionInfo;
+    }
+
+    async function setupDailyRoom(dailyRoomUrl, dailyToken) {
+      updateStatus('Connecting to Daily room...', 'connecting');
+
+      // Create Daily call frame
+      dailyCall = DailyIframe.createFrame(document.getElementById('daily-iframe'), {
+        showLeaveButton: true,
+        showFullscreenButton: true,
+      });
+
+      // Join the room
+      await dailyCall.join({
+        url: dailyRoomUrl,
+        token: dailyToken,
+        userName: 'Lemon Slice Test User',
+      });
+
+      updateStatus('Connected to Daily room', 'connected');
+      return dailyCall;
+    }
+
+    async function setupWebSocketUrl(sessionInfo) {
+      const httpUrl = 'https://' + sessionInfo.session_url;
+      
+      const pingResponse = await fetch(httpUrl + '/status');
+      const pingData = await pingResponse.json();
+
+      if (pingData.status !== 'OK') {
+        throw new Error('Server status is not OK');
+      }
+
+      const streamPath = '/stream/' + sessionInfo.conversation_id;
+      const websocketUrl = 'wss://' + sessionInfo.session_url + streamPath;
+      return websocketUrl;
+    }
+
+    function handleWebSocketMessage(data) {
+      if (data.type === 'LS_audio_received') {
+        console.log('Audio received confirmation');
+      } else if (data.type === 'LS_processing_complete') {
+        console.log('Processing completed, video should appear in Daily room');
+        updateStatus('Processing complete - check Daily room for video', 'connected');
+      }
+    }
+
+    async function initializeConnection() {
+      try {
+        const token = document.getElementById('apiTokenInput').value.trim();
+        if (!token) {
+          updateStatus('API token required!', 'error');
+          return;
+        }
+
+        document.getElementById('connectBtn').disabled = true;
+        document.getElementById('stopBtn').disabled = false;
+        isStreaming = true;
+
+        // Setup session and get Daily room info
+        const sessionInfo = await setupSession();
+        
+        if (!sessionInfo.daily_room_url || !sessionInfo.daily_token) {
+          throw new Error('Session info missing Daily room URL or token');
+        }
+
+        // Setup Daily room
+        await setupDailyRoom(sessionInfo.daily_room_url, sessionInfo.daily_token);
+
+        // Setup WebSocket for audio streaming
+        updateStatus('Setting up audio stream...', 'connecting');
+        const wsUrl = await setupWebSocketUrl(sessionInfo);
+
+        // Connect to WebSocket
+        websocket = new WebSocket(wsUrl);
+        responseId = generateUUID();
+
+        websocket.onopen = () => {
+          updateStatus('WebSocket connected!', 'connected');
+          document.getElementById('sendAudioBtn').disabled = false;
+        };
+
+        websocket.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            handleWebSocketMessage(data);
+          } catch (error) {
+            console.error('Failed to parse WebSocket message:', error);
+          }
+        };
+
+        websocket.onclose = () => {
+          console.log('WebSocket connection closed');
+        };
+
+        websocket.onerror = (error) => {
+          updateStatus('WebSocket error occurred', 'error');
+          console.error('WebSocket error:', error);
+        };
+
+      } catch (error) {
+        updateStatus(`Error: ${error.message}`, 'error');
+        console.error('Connection error:', error);
+        document.getElementById('connectBtn').disabled = false;
+        document.getElementById('sendAudioBtn').disabled = true;
+        document.getElementById('stopBtn').disabled = true;
+      }
+    }
+
+    async function sendAudio() {
+      if (!websocket) {
+        updateStatus('Websocket not open!', 'error');
+        return;
+      }
+
+      if (!audioData) {
+        updateStatus('No audio data loaded', 'error');
+        return;
+      }
+
+      const playCount = parseInt(document.getElementById('playCount').value);
+
+      websocket.send(JSON.stringify({
+        type: 'initialize_response',
+        response_id: responseId
+      }));
+
+      updateStatus(`Streaming audio ${playCount}x...`, 'connecting');
+
+      const chunkSize = 3200; // 100ms at 16kHz, 16-bit depth
+
+      for (let playIteration = 0; playIteration < playCount; playIteration++) {
+        console.log(`Sending iteration ${playIteration + 1} of ${playCount}`);
+
+        for (let i = 0; i < audioData.length; i += chunkSize) {
+          const chunk = audioData.slice(i, i + chunkSize);
+          const chunkB64 = btoa(String.fromCharCode(...chunk));
+
+          websocket.send(JSON.stringify({
+            type: 'audio_buffer_append',
+            audio: chunkB64,
+            response_id: responseId
+          }));
+        }
+      }
+
+      // Commit the response
+      websocket.send(JSON.stringify({
+        type: 'commit',
+        response_id: responseId
+      }));
+
+      updateStatus('Audio streaming completed, video will appear in Daily room...', 'connected');
+    }
+
+    function stopStream() {
+      if (websocket) {
+        websocket.close();
+      }
+
+      if (dailyCall) {
+        dailyCall.leave();
+        dailyCall.destroy();
+        dailyCall = null;
+      }
+
+      isStreaming = false;
+      document.getElementById('connectBtn').disabled = false;
+      document.getElementById('sendAudioBtn').disabled = true;
+      document.getElementById('stopBtn').disabled = true;
+      updateStatus('Stream stopped', '');
+    }
+
+    // Handle audio file upload
+    document.getElementById('audioFile').addEventListener('change', (event) => {
+      const file = event.target.files[0];
+      if (file) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          audioData = new Uint8Array(e.target.result);
+          updateStatus(`Audio file loaded: ${file.name} (${audioData.length} bytes)`, 'connected');
+        };
+        reader.readAsArrayBuffer(file);
+      }
+    });
+
+    window.onload = function() {
+      document.getElementById("imageUrlInput").value = DEFAULT_IMAGE_URL;
+    };
+
+    // Cleanup on page unload
+    window.addEventListener('beforeunload', () => {
+      if (websocket) {
+        websocket.close();
+      }
+      if (dailyCall) {
+        dailyCall.leave();
+        dailyCall.destroy();
+      }
+    });
+  </script>
+</body>
+</html>
