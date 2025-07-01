@@ -123,7 +123,7 @@
         💡 Characters are cached per image URL. Change the URL to create a new character.
       </small>
 
-      <label for="audioFile">Audio File (Raw 16kHz):</label>
+      <label for="audioFile">Audio File (pcm_s16le format, 16kHz):</label>
       <input type="file" id="audioFile" accept=".raw,.pcm">
 
       <label for="playCount">Play Count (to test long responses):</label>
@@ -147,13 +147,13 @@
   </div>
 
   <script>
-    const API_BASE_URL = "https://www.lemonslice.com/api/stream";
-    const FRAME_RATE = 25;
+    const API_BASE_URL = "https://lemonslice.com/api/stream";
     const DEFAULT_IMAGE_URL = "https://6ammc3n5zzf5ljnz.public.blob.vercel-storage.com/inf2-image-uploads/image_63e52-eRRSrv7K7CQ4Bgp8ojTbpiR6ZBoqfT.jpg"
 
     let websocket = null;
     let responseId = null;
     let dailyCall = null;
+    let sessionInfo = null;
     let characterCache = {
       [DEFAULT_IMAGE_URL]: {
         "square_base_img_url": "https://6ammc3n5zzf5ljnz.public.blob.vercel-storage.com/chat-cache/cropped-images/image-Z9bwrml0s5RoCw8rSAu9vLwvaMMIUp.png",
@@ -196,7 +196,7 @@
 
     async function makeRequest(url, options = {}) {
       const authHeaders = getAuthHeaders();
-      
+
       const response = await fetch(url, {
         ...options,
         headers: {
@@ -311,7 +311,7 @@
         isStreaming = true;
 
         // Setup session and get Daily room info
-        const sessionInfo = await setupSession();
+        sessionInfo = await setupSession();
         
         if (!sessionInfo.daily_room_url || !sessionInfo.daily_token) {
           throw new Error('Session info missing Daily room URL or token');
@@ -406,7 +406,18 @@
       updateStatus('Audio streaming completed, video will appear in Daily room...', 'connected');
     }
 
-    function stopStream() {
+    async function stopStream() {
+
+      if (sessionInfo) {
+        const sessionUrl = sessionInfo.session_url;
+        const conversationId = sessionInfo.conversation_id;
+        const endUrl = `https://${sessionUrl}/conversations/${conversationId}/end`;
+        const response = await makeRequest(endUrl, {
+          method: 'POST'
+        });
+        console.log('End request response:', response);
+      }
+
       if (websocket) {
         websocket.close();
       }
